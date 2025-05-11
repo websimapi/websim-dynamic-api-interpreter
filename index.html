@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic API Interpreter</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+        }
+        pre {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .log-container {
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            padding: 10px;
+            border-radius: 4px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 8px;
+            background-color: #f9f9f9;
+            border-radius: 4px;
+        }
+        .error {
+            color: #e74c3c;
+        }
+        .success {
+            color: #2ecc71;
+        }
+        .info {
+            color: #3498db;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Dynamic API Interpreter</h1>
+        <p>This page acts as a dynamic API endpoint that interprets and executes query parameters.</p>
+        
+        <h2>Request Details</h2>
+        <div id="request-info"></div>
+        
+        <h2>Execution Log</h2>
+        <div class="log-container" id="log-container"></div>
+    </div>
+
+    <script>
+        // Initialize WebsimSocket for database operations
+        const room = new WebsimSocket();
+        
+        // Main execution context
+        class ApiInterpreter {
+            constructor() {
+                this.queryParams = {};
+                this.logs = [];
+                this.processedActions = [];
+                this.executionComplete = false;
+                this.paramHistory = [];
+            }
+
+            // Parse query parameters
+            parseQueryParams() {
+                const urlParams = new URLSearchParams(window.location.search);
+                for (const [key, value] of urlParams.entries()) {
+                    this.queryParams[key] = value;
+                }
+                this.log("info", "Query parameters parsed", this.queryParams);
+                this.displayRequestInfo();
+            }
+
+            // Display request information
+            displayRequestInfo() {
+                const requestInfoElement = document.getElementById('request-info');
+                let html = '<pre>';
+                html += JSON.stringify(this.queryParams, null, 2);
+                html += '</pre>';
+                requestInfoElement.innerHTML = html;
+            }
+
+            // Add log entry
+            log(type, message, data = null) {
+                const logEntry = {
+                    timestamp: new Date().toISOString(),
+                    type,
+                    message,
+                    data
+                };
+                this.logs.push(logEntry);
+                this.updateLogDisplay();
+            }
+
+            // Update log display
+            updateLogDisplay() {
+                const logContainer = document.getElementById('log-container');
+                let html = '';
+                
+                this.logs.forEach(entry => {
+                    html += `<div class="log-entry ${entry.type}">`;
+                    html += `<strong>[${entry.type.toUpperCase()}]</strong> ${entry.message}`;
+                    if (entry.data) {
+                        if (typeof entry.data === 'object') {
+                            html += `<pre>${JSON.stringify(entry.data, null, 2)}</pre>`;
+                        } else {
+                            html += `<pre>${entry.data}</pre>`;
+                        }
+                    }
+                    html += '</div>';
+                });
+                
+                logContainer.innerHTML = html;
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+
+            // Store query in database
+            async storeQuery() {
+                try {
+                    const queryRecord = await room.collection('api_query').create({
+                        params: this.queryParams,
+                        timestamp: new Date().toISOString(),
+                        executionLog: this.logs
+                    });
+                    this.log("success", "Query stored in database", { record_id: queryRecord.id });
+                    return queryRecord;
+                } catch (error) {
+                    this.log("error", "Failed to store query in database", error);
+                    throw error;
+                }
+            }
+
+            // Execute actions based on parameters
+            async executeActions() {
+                // Check for params array to process
+                if (this.queryParams.params) {
+                    try {
+                        let params;
+                        try {
+                            params = JSON.parse(this.queryParams.params);
+                        } catch (e) {
+                            // If it's not JSON, try to interpret it as a string
+                            params = this.queryParams.params;
+                        }
+                        
+                        this.log("info", "Processing params", params);
+                        
+                        // Store in history
+                        this.paramHistory.push(params);
+                        
+                        // If params is an object or array, process each property
+                        if (typeof params === 'object' && params !== null) {
+                            for (const [key, value] of Object.entries(params)) {
+                                await this.processParamAction(key, value);
+                            }
+                        } else {
+                            // If it's a string, try to interpret it
+                            await this.interpretStringCommand(params);
+                        }
+                    } catch (error) {
+                        this.log("error", "Error processing params", error);
+                    }
+                }
+                
+                // Process individual query parameters
+                for (const [key, value] of Object.entries(this.queryParams)) {
+                    // Skip params key as it's processed above
+                    if (key === 'params') continue;
+                    
+                    await this.processQueryParam(key, value);
+                }
+                
+                // Check if we need to redirect
+                if (this.queryParams.callback_url) {
+                    this.prepareRedirect();
+                }
+                
+                this.executionComplete = true;
+                this.log("success", "Execution complete");
+            }
+            
+            // Process individual query parameter
+            async processQueryParam(key, value) {
+                this.log("info", `Processing parameter: ${key}=${value}`);
+                
+                switch(key.toLowerCase()) {
+                    case 'consolelog':
+                        console.log(value);
+                        this.log("info", "Console log executed", value);
+                        this.processedActions.push({ type: 'consolelog', value });
+                        break;
+                        
+                    case 'store':
+                        await this.storeData(value);
+                        break;
+                        
+                    case 'callback_url':
+                        // Handled in the redirect preparation
+                        break;
+                        
+                    case 'execute':
+                        await this.executeCode(value);
+                        break;
+                        
+                    case 'wait':
+                        await this.wait(parseInt(value) || 1000);
+                        break;
+                        
+                    default:
+                        // Try to interpret custom commands
+                        if (key.startsWith('exec_')) {
+                            const functionName = key.substring(5);
+                            await this.executeCustomFunction(functionName, value);
+                        }
+                }
+            }
+            
+            // Process an action from the params object
+            async processParamAction(key, value) {
+                this.log("info", `Processing param action: ${key}`, value);
+                
+                switch(key.toLowerCase()) {
+                    case 'execute':
+                    case 'exec':
+                        await this.executeCode(value);
+                        break;
+                        
+                    case 'log':
+                        console.log(value);
+                        this.log("info", "Log from params", value);
+                        break;
+                        
+                    case 'store':
+                        await this.storeData(value);
+                        break;
+                        
+                    case 'alert':
+                        alert(value);
+                        this.log("info", "Alert displayed", value);
+                        break;
+                        
+                    case 'wait':
+                        await this.wait(parseInt(value) || 1000);
+                        break;
+                        
+                    case 'setcookie':
+                        if (typeof value === 'object') {
+                            document.cookie = `${value.name}=${value.value}; path=/; max-age=${value.maxAge || 86400}`;
+                            this.log("info", "Cookie set", value);
+                        }
+                        break;
+                        
+                    default:
+                        // For nested objects, recurse
+                        if (typeof value === 'object' && value !== null) {
+                            for (const [nestedKey, nestedValue] of Object.entries(value)) {
+                                await this.processParamAction(`${key}.${nestedKey}`, nestedValue);
+                            }
+                        }
+                }
+            }
+            
+            // Interpret a string command
+            async interpretStringCommand(command) {
+                this.log("info", "Interpreting string command", command);
+                
+                // Simple command pattern matching
+                if (command.startsWith('log:')) {
+                    const logMessage = command.substring(4).trim();
+                    console.log(logMessage);
+                    this.log("info", "Interpreted log command", logMessage);
+                }
+                else if (command.startsWith('alert:')) {
+                    const alertMessage = command.substring(6).trim();
+                    alert(alertMessage);
+                    this.log("info", "Interpreted alert command", alertMessage);
+                }
+                else if (command.startsWith('wait:')) {
+                    const waitTime = parseInt(command.substring(5).trim()) || 1000;
+                    await this.wait(waitTime);
+                }
+                else if (command.startsWith('redirect:')) {
+                    const url = command.substring(9).trim();
+                    this.queryParams.callback_url = url;
+                    this.log("info", "Interpreted redirect command", url);
+                }
+                else {
+                    // Default to executing as code if it looks like JavaScript
+                    if (command.includes('{') || command.includes('function') || command.includes('=>')) {
+                        await this.executeCode(command);
+                    } else {
+                        this.log("info", "Command not recognized, storing as data", command);
+                        await this.storeData(command);
+                    }
+                }
+            }
+            
+            // Execute custom function
+            async executeCustomFunction(functionName, value) {
+                this.log("info", `Executing custom function: ${functionName}`, value);
+                
+                switch(functionName.toLowerCase()) {
+                    case 'fetch':
+                        try {
+                            const response = await fetch(value);
+                            const data = await response.json();
+                            this.log("success", "Fetch completed", data);
+                            this.processedActions.push({ type: 'fetch', url: value, result: data });
+                        } catch (error) {
+                            this.log("error", "Fetch failed", error);
+                        }
+                        break;
+                        
+                    case 'settitle':
+                        document.title = value;
+                        this.log("info", "Page title set", value);
+                        break;
+                        
+                    default:
+                        this.log("warning", `Unknown custom function: ${functionName}`);
+                }
+            }
+            
+            // Execute JavaScript code
+            async executeCode(code) {
+                this.log("info", "Executing code", code);
+                try {
+                    // Create a function from the code string
+                    const execFunction = new Function('context', `
+                        return (async function() {
+                            try {
+                                ${code}
+                                return { success: true };
+                            } catch (error) {
+                                return { success: false, error: error.message };
+                            }
+                        })();
+                    `);
+                    
+                    // Execute with this instance as context
+                    const result = await execFunction(this);
+                    
+                    if (result.success) {
+                        this.log("success", "Code executed successfully", result);
+                    } else {
+                        this.log("error", "Code execution failed", result.error);
+                    }
+                    
+                    this.processedActions.push({ type: 'execute', code, result });
+                } catch (error) {
+                    this.log("error", "Error executing code", error.message);
+                }
+            }
+            
+            // Store data in the database
+            async storeData(data) {
+                this.log("info", "Storing data", data);
+                
+                try {
+                    let dataToStore = data;
+                    
+                    // If it's a string, try to parse it as JSON
+                    if (typeof data === 'string') {
+                        try {
+                            dataToStore = JSON.parse(data);
+                        } catch (e) {
+                            // Keep as string if parsing fails
+                            dataToStore = { value: data };
+                        }
+                    }
+                    
+                    const storedData = await room.collection('api_data').create({
+                        data: dataToStore,
+                        timestamp: new Date().toISOString()
+                    });
+                    
+                    this.log("success", "Data stored successfully", { record_id: storedData.id });
+                    this.processedActions.push({ type: 'store', data: dataToStore, record_id: storedData.id });
+                } catch (error) {
+                    this.log("error", "Failed to store data", error);
+                }
+            }
+            
+            // Wait for specified milliseconds
+            async wait(ms) {
+                this.log("info", `Waiting for ${ms}ms`);
+                return new Promise(resolve => setTimeout(resolve, ms));
+            }
+            
+            // Prepare redirect with parameters
+            prepareRedirect() {
+                let callbackUrl = this.queryParams.callback_url;
+                this.log("info", "Preparing redirect to", callbackUrl);
+                
+                // Check if we need to append params
+                if (this.paramHistory.length > 0 || Object.keys(this.processedActions).length > 0) {
+                    const paramsToSend = {
+                        history: this.paramHistory,
+                        actions: this.processedActions
+                    };
+                    
+                    const encodedParams = encodeURIComponent(JSON.stringify(paramsToSend));
+                    
+                    // Determine if we need to add ? or & to the URL
+                    const separator = callbackUrl.includes('?') ? '&' : '?';
+                    callbackUrl += `${separator}params=${encodedParams}`;
+                }
+                
+                this.log("info", "Redirecting to", callbackUrl);
+                
+                // Set a small timeout to allow logs to be displayed
+                setTimeout(() => {
+                    window.location.href = callbackUrl;
+                }, 1000);
+            }
+            
+            // Main execution flow
+            async execute() {
+                this.parseQueryParams();
+                await this.storeQuery();
+                await this.executeActions();
+            }
+        }
+        
+        // Initialize and execute
+        const api = new ApiInterpreter();
+        api.execute();
+    </script>
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
+
